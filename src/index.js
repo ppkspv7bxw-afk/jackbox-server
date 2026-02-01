@@ -10,11 +10,8 @@ const app = express();
 const server = http.createServer(app);
 
 const PORT = process.env.PORT || 3000;
-
-// رابط موقعك (لصناعة روابط QR)
 const SITE_ORIGIN = process.env.SITE_ORIGIN || "https://www.gamehub4u.com";
 
-// Serve static public
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 // ===== QR endpoint (PNG reliable) =====
@@ -45,17 +42,6 @@ const io = new Server(server, {
 });
 
 // ===== Rooms State =====
-/**
- * rooms:
- * roomCode -> {
- *   hostClientId: string,
- *   hostSocketId: string|null,
- *   hostGoneTimer: Timeout|null,
- *   players: Map<clientId, { clientId, name, ready, socketId }>
- *   hub: { currentGame, scoreboard, history }
- *   mafia: { ... } | null
- * }
- */
 const rooms = new Map();
 
 function normalizeRoom(x) {
@@ -223,7 +209,7 @@ io.on("connection", (socket) => {
   socket.on("host:createRoom", () => {
     if (!clientId) return;
 
-    // إذا هذا الهوست كان عنده غرفة قبل، اقفلها
+    // close any old room owned by same host id
     for (const [code, r] of rooms.entries()) {
       if (r.hostClientId === clientId) {
         rooms.delete(code);
@@ -275,6 +261,41 @@ io.on("connection", (socket) => {
     if (room.mafia?.started) {
       socket.emit("mafia:state", mafiaPublicState(room, clientId));
     }
+  });
+
+  // ✅ NEW: Host joins as player with a name (Host & Player mode)
+  socket.on("host:joinAsPlayer", ({ roomCode, name }) => {
+    const code = normalizeRoom(roomCode);
+    const room = rooms.get(code);
+    if (!room) {
+      socket.emit("host:joinAsPlayer:error", { message: "ROOM_NOT_FOUND" });
+      return;
+    }
+    if (!isHost(room, socket)) {
+      socket.emit("host:joinAsPlayer:error", { message: "NOT_HOST" });
+      return;
+    }
+
+    const nm = String(name || "").trim().slice(0, 24);
+    if (!nm) {
+      socket.emit("host:joinAsPlayer:error", { message: "NAME_REQUIRED" });
+      return;
+    }
+
+    // upsert host as a player
+    room.players.set(clientId, {
+      clientId,
+      name: nm,
+      ready: false,
+      socketId: socket.id,
+    });
+
+    ensureScore(room, { clientId, name: nm });
+    socket.join(code);
+
+    socket.emit("host:joinedAsPlayer", { roomCode: code, name: nm });
+    broadcastRoomState(code);
+    broadcastHub(code);
   });
 
   // ---- Player joins ----
@@ -375,7 +396,7 @@ io.on("connection", (socket) => {
     socket.emit("hub:state", hubState(code));
   });
 
-  // ---- Hub: select game (future) ----
+  // ---- Hub: select game ----
   socket.on("hub:setGame", ({ roomCode, game }) => {
     const code = normalizeRoom(roomCode);
     const room = rooms.get(code);
@@ -487,6 +508,7 @@ io.on("connection", (socket) => {
     room.hub.currentGame = "mafia";
 
     for (const p of players) {
+      if (!p.socketId) continue;
       io.to(p.socketId).emit("mafia:role", { roomCode: code, role: assignments[p.clientId] });
       io.to(p.socketId).emit("mafia:state", mafiaPublicState(room, p.clientId));
     }
@@ -602,7 +624,6 @@ io.on("connection", (socket) => {
     pushMafiaStateToAll(room, code);
   });
 
-  // Host: force resolve night
   socket.on("mafia:forceResolveNight", ({ roomCode }) => {
     const code = normalizeRoom(roomCode);
     const room = rooms.get(code);
@@ -621,7 +642,6 @@ io.on("connection", (socket) => {
     pushMafiaStateToAll(room, code);
   });
 
-  // Host: force resolve day
   socket.on("mafia:forceResolveDay", ({ roomCode }) => {
     const code = normalizeRoom(roomCode);
     const room = rooms.get(code);
@@ -728,9 +748,7 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("room:state", roomState(roomCode));
   }
 
-  // ---- Disconnect handling ----
   socket.on("disconnect", () => {
-    // لو هذا socket هو الهوست، لا تقفل الغرفة فورًا (مهلة يرجع)
     for (const [code, room] of rooms.entries()) {
       if (room.hostSocketId === socket.id) {
         room.hostSocketId = null;
@@ -746,7 +764,6 @@ io.on("connection", (socket) => {
       }
     }
 
-    // لاعب: لا نحذفه — نخليه يقدر يرجع attach
     for (const [code, room] of rooms.entries()) {
       let changed = false;
       for (const p of room.players.values()) {
