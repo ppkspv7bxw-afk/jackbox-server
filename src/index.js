@@ -65,7 +65,6 @@ function roomPublicState(code) {
   }));
 
   const gameKey = room.game?.key || null;
-
   return { roomCode: code, players: players.map(p => ({ name: p.name, ready: p.ready })), gameKey };
 }
 
@@ -80,10 +79,6 @@ function allReady(code) {
   if (!room) return false;
   const arr = [...room.players.values()];
   return arr.length > 0 && arr.every(p => !!p.ready);
-}
-
-function getPlayerByClientId(room, clientId) {
-  return room.players.get(clientId) || null;
 }
 
 function getSocketIdForClient(room, clientId) {
@@ -107,7 +102,6 @@ function mafiaAssignRoles(room) {
 
   const n = entries.length;
 
-  // توزيع افتراضي (ممتاز وبسيط)
   let mafiaCount = 1;
   if (n >= 7 && n <= 8) mafiaCount = 2;
   if (n >= 9) mafiaCount = 3;
@@ -115,7 +109,7 @@ function mafiaAssignRoles(room) {
   const roles = new Map(); // clientId => role
   const alive = entries.map(e => e.clientId);
 
-  // خلط
+  // shuffle
   const shuffled = entries.slice();
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -124,8 +118,6 @@ function mafiaAssignRoles(room) {
 
   const mafiaIds = new Set(shuffled.slice(0, mafiaCount).map(x => x.clientId));
 
-  // دكتور + محقق (إذا فيه عدد كافي)
-  // إذا عدد قليل جدًا، نخليها: مافيا + دكتور + مدني
   let doctorId = null;
   let detectiveId = null;
 
@@ -140,13 +132,7 @@ function mafiaAssignRoles(room) {
     else roles.set(clientId, "civilian");
   }
 
-  return {
-    alive,
-    roles,        // Map
-    mafiaIds,     // Set
-    doctorId,
-    detectiveId,
-  };
+  return { alive, roles, mafiaIds, doctorId, detectiveId };
 }
 
 function mafiaPublicView(roomCode) {
@@ -164,7 +150,6 @@ function mafiaPublicView(roomCode) {
   const day = s.day;
   const lastEvent = s.lastEvent || null;
 
-  // تصويت: نعطي فقط الإجمالي (بدون تفاصيل لمن صوت لمن)
   const voteCounts = {};
   if (phase === "vote" && s.votes) {
     for (const targetId of Object.values(s.votes)) {
@@ -194,7 +179,6 @@ function mafiaEmitAll(roomCode) {
   if (!pub) return;
   io.to(roomCode).emit("mafia:state", pub);
 
-  // إرسال الدور لكل لاعب بشكل خاص
   const room = rooms.get(roomCode);
   const s = room.game.state;
 
@@ -203,9 +187,10 @@ function mafiaEmitAll(roomCode) {
     const isAlive = (s.alive || []).includes(clientId);
     const you = { role, isAlive, name: p.name };
 
-    // معلومات إضافية للمافيا: أسماء المافيا
     if (role === "mafia") {
-      const mafiaNames = [...s.mafiaIds].map(cid => room.players.get(cid)?.name).filter(Boolean);
+      const mafiaNames = [...s.mafiaIds]
+        .map(cid => room.players.get(cid)?.name)
+        .filter(Boolean);
       you.mafiaNames = mafiaNames;
     }
 
@@ -244,10 +229,10 @@ function mafiaStart(roomCode) {
     key: "mafia",
     state: {
       day: 1,
-      phase: "night_mafia", // نبدأ ليل مباشرة
+      phase: "night_mafia",
       alive: pack.alive,
-      roles: pack.roles, // Map
-      mafiaIds: pack.mafiaIds, // Set
+      roles: pack.roles,
+      mafiaIds: pack.mafiaIds,
       doctorId: pack.doctorId,
       detectiveId: pack.detectiveId,
 
@@ -255,9 +240,7 @@ function mafiaStart(roomCode) {
       doctorSave: null,
       detectiveInspect: null,
 
-      revealed: null,
       lastEvent: null,
-
       votes: {}, // voterClientId => targetClientId
     }
   };
@@ -285,7 +268,6 @@ function mafiaNextPhase(roomCode) {
     s.phase = "night_detective";
     s.lastEvent = { type: "phase", text: "Detective turn" };
   } else if (s.phase === "night_detective") {
-    // resolve night
     const killed = s.mafiaTarget;
     const saved = s.doctorSave;
 
@@ -295,7 +277,6 @@ function mafiaNextPhase(roomCode) {
       dead = killed;
     }
 
-    // detective reveal to detective privately
     if (s.detectiveInspect && s.detectiveId) {
       const targetRole = s.roles.get(s.detectiveInspect);
       const isMafia = targetRole === "mafia";
@@ -310,7 +291,6 @@ function mafiaNextPhase(roomCode) {
       deadName: dead ? (room.players.get(dead)?.name || null) : null
     };
 
-    // reset night selections
     s.mafiaTarget = null;
     s.doctorSave = null;
     s.detectiveInspect = null;
@@ -321,7 +301,6 @@ function mafiaNextPhase(roomCode) {
     s.votes = {};
     s.lastEvent = { type: "phase", text: "Voting started" };
   } else if (s.phase === "vote") {
-    // resolve vote
     const alive = s.alive || [];
     const tally = {};
     for (const [voter, target] of Object.entries(s.votes || {})) {
@@ -336,7 +315,6 @@ function mafiaNextPhase(roomCode) {
       if (cnt > best) { best = cnt; eliminated = target; }
     }
 
-    // يحتاج أغلبية بسيطة (>= ceil(alive/2))
     const need = Math.ceil(alive.length / 2);
     if (eliminated && best >= need) {
       s.alive = s.alive.filter(x => x !== eliminated);
@@ -345,12 +323,10 @@ function mafiaNextPhase(roomCode) {
       s.lastEvent = { type: "vote_result", outName: null, votes: best < 0 ? 0 : best, need };
     }
 
-    // next day
     s.day += 1;
     s.phase = "night_mafia";
   }
 
-  // check win after transitions
   const win2 = mafiaCheckWin(roomCode);
   if (win2) {
     s.phase = "ended";
@@ -434,6 +410,9 @@ io.on("connection", (socket) => {
 
     emitRoomState(code);
 
+    // ✅ تأكيد رسمي للفرونت
+    socket.emit("player:joined", { roomCode: code, name: nm });
+
     // إذا فيه لعبة شغالة، خل اللاعب يلتحق بها
     if (room.game?.key === "mafia") {
       mafiaEmitAll(code);
@@ -455,8 +434,12 @@ io.on("connection", (socket) => {
 
     socket.join(code);
 
+    // ✅ تأكيد attach للفرونت
+    socket.emit("player:joined", { roomCode: code, name: p.name });
+
     // send current room state + game state (if any)
-    socket.emit("room:state", { roomCode: code, players: roomPublicState(code).players });
+    const st = roomPublicState(code);
+    socket.emit("room:state", { roomCode: code, players: st.players });
     emitRoomState(code);
 
     if (room.game?.key === "mafia") {
@@ -516,9 +499,9 @@ io.on("connection", (socket) => {
     const alive = s.alive || [];
     if (!alive.includes(cid)) return;
 
-    // find target by name (alive only)
-    const targetId = [...room.players.entries()]
-      .find(([id, p]) => p.name === String(targetName || "") && alive.includes(id))?.[0] || null;
+    const targetId =
+      [...room.players.entries()]
+        .find(([id, p]) => p.name === String(targetName || "") && alive.includes(id))?.[0] || null;
 
     if (!targetId) return;
 
@@ -561,8 +544,9 @@ io.on("connection", (socket) => {
     const alive = s.alive || [];
     if (!alive.includes(cid)) return;
 
-    const targetId = [...room.players.entries()]
-      .find(([id, p]) => p.name === String(targetName || "") && alive.includes(id))?.[0] || null;
+    const targetId =
+      [...room.players.entries()]
+        .find(([id, p]) => p.name === String(targetName || "") && alive.includes(id))?.[0] || null;
 
     if (!targetId) return;
 
@@ -577,7 +561,7 @@ io.on("connection", (socket) => {
     const code = normRoom(roomCode);
     if (!rooms.has(code)) return;
     const room = rooms.get(code);
-    if (room.hostId !== socket.id) return; // only host
+    if (room.hostId !== socket.id) return;
     if (!room.game || room.game.key !== "mafia") return;
 
     mafiaNextPhase(code);
@@ -586,6 +570,7 @@ io.on("connection", (socket) => {
   // cleanup
   socket.on("disconnect", () => {
     for (const [code, room] of rooms.entries()) {
+      // Host disconnected => kill room
       if (room.hostId === socket.id) {
         io.to(code).emit("room:error", { message: "Host disconnected" });
         io.in(code).socketsLeave(code);
@@ -593,6 +578,7 @@ io.on("connection", (socket) => {
         continue;
       }
 
+      // Mark player socket as disconnected
       for (const [cid, p] of room.players.entries()) {
         if (p.socketId === socket.id) {
           p.socketId = "";
